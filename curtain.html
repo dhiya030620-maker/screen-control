@@ -1,85 +1,64 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8">
-  <title>Curtain Detection - Mobile Friendly</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      text-align: center;
-      background: #f0f0f0;
-      margin: 0;
-      padding: 20px;
-    }
-    button {
-      display: block;
-      width: 80%;
-      max-width: 300px;
-      margin: 20px auto;
-      padding: 15px;
-      font-size: 20px;
-      background: #007BFF;
-      color: white;
-      border: none;
-      border-radius: 8px;
-      cursor: pointer;
-    }
-    button:hover {
-      background: #0056b3;
-    }
-    #webcam-container {
-      margin: 0 auto;
-      width: 220px;
-      height: 220px;
-    }
-    #label-container div {
-      font-size: 18px;
-      margin-top: 8px;
-    }
-    #status {
-      margin-top: 15px;
-      font-weight: bold;
-      color: green;
-    }
-  </style>
+  <title>Teachable Machine Mobile + ThingSpeak</title>
 </head>
 <body>
-  <h2>Curtain Detection (Mobile + Laptop)</h2>
-  <button type="button" onclick="init()">Start</button>
+  <div>Teachable Machine Image Model</div>
+  <button id="start-btn">Start</button>
+  <button id="stop-btn">Stop</button>
+  <button id="toggle-camera-btn">Switch Camera</button>
   <div id="webcam-container"></div>
   <div id="label-container"></div>
-  <div id="status"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
-  <script>
-    const URL = "https://teachablemachine.withgoogle.com/models/oN-RCT-YD/";
-    const apiKey = "RVM93PYQL3CHL23X";
+
+  <script type="text/javascript">
+    const URL = "https://teachablemachine.withgoogle.com/models/E1tJ82W9e/";
+    const THINGSPEAK_WRITE_API_KEY = "RVM93PYQL3CHL23X";
+
     let model, webcam, labelContainer, maxPredictions;
-    let lastUpdateTime = 0;
+    let currentFacingMode = "environment"; // back camera
+    let running = false;
+
+    document.getElementById("start-btn").addEventListener("click", init);
+    document.getElementById("stop-btn").addEventListener("click", stopWebcam);
+    document.getElementById("toggle-camera-btn").addEventListener("click", toggleCamera);
 
     async function init() {
+      if (running) return; // prevent multiple starts
+      running = true;
+
       const modelURL = URL + "model.json";
       const metadataURL = URL + "metadata.json";
 
-      model = await tmImage.load(modelURL, metadataURL);
-      maxPredictions = model.getTotalClasses();
+      // Load Teachable Machine model
+      if (!model) {
+        model = await tmImage.load(modelURL, metadataURL);
+        maxPredictions = model.getTotalClasses();
+      }
 
-      const flip = true;
-      webcam = new tmImage.Webcam(200, 200, flip);
-      await webcam.setup({ facingMode: "environment" }); // mobile back camera
+      // Setup webcam
+      webcam = new tmImage.Webcam(320, 320, true);
+      await webcam.setup({ facingMode: currentFacingMode });
       await webcam.play();
       window.requestAnimationFrame(loop);
 
+      // Add webcam to DOM
+      document.getElementById("webcam-container").innerHTML = "";
       document.getElementById("webcam-container").appendChild(webcam.canvas);
+
+      // Create label divs
       labelContainer = document.getElementById("label-container");
+      labelContainer.innerHTML = "";
       for (let i = 0; i < maxPredictions; i++) {
         labelContainer.appendChild(document.createElement("div"));
       }
     }
 
     async function loop() {
+      if (!running) return;
       webcam.update();
       await predict();
       window.requestAnimationFrame(loop);
@@ -88,33 +67,47 @@
     async function predict() {
       const prediction = await model.predict(webcam.canvas);
 
+      // Update label container
       for (let i = 0; i < maxPredictions; i++) {
-        const classPrediction =
+        labelContainer.childNodes[i].innerHTML =
           prediction[i].className + ": " + prediction[i].probability.toFixed(2);
-        labelContainer.childNodes[i].innerHTML = classPrediction;
       }
 
-      if (prediction[0].probability >= 0.8) {
-        sendToThingSpeak(1, 0, "Class1 → Curtain Open");
-      } else if (prediction[1].probability >= 0.8) {
-        sendToThingSpeak(0, 1, "Class2 → Curtain Closed");
+      // ThingSpeak logic (70% threshold)
+      const class1 = prediction[0];
+      const class2 = prediction[1];
+
+      if (class1.probability >= 0.7) {
+        sendToThingSpeak(1, 0);
+      } else if (class2.probability >= 0.7) {
+        sendToThingSpeak(0, 1);
       }
     }
 
-    function sendToThingSpeak(field1Value, field2Value, msg) {
-      const now = Date.now();
-      if (now - lastUpdateTime < 15000) return;
-      lastUpdateTime = now;
+    async function sendToThingSpeak(field1Value, field2Value) {
+      const url = `https://api.thingspeak.com/update.json?api_key=${THINGSPEAK_WRITE_API_KEY}&field1=${field1Value}&field2=${field2Value}`;
+      try {
+        await fetch(url, { method: "GET" });
+        console.log(`ThingSpeak updated: Field1=${field1Value}, Field2=${field2Value}`);
+      } catch (err) {
+        console.error("ThingSpeak update failed:", err);
+      }
+    }
 
-      const url = `https://api.thingspeak.com/update?api_key=${apiKey}&field1=${field1Value}&field2=${field2Value}`;
-      fetch(url)
-        .then(response => {
-          document.getElementById("status").innerText = msg + " (sent)";
-        })
-        .catch(error => {
-          document.getElementById("status").innerText = "Error sending data";
-          console.error(error);
-        });
+    async function stopWebcam() {
+      if (webcam) {
+        webcam.stop();
+        running = false;
+        document.getElementById("webcam-container").innerHTML = "";
+      }
+    }
+
+    async function toggleCamera() {
+      currentFacingMode = currentFacingMode === "environment" ? "user" : "environment";
+      if (webcam) {
+        webcam.stop();
+        await init();
+      }
     }
   </script>
 </body>
